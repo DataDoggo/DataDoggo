@@ -1,0 +1,468 @@
+---
+title: "FDS Final Project: Report #4"
+author: "Satu Iho"
+output: html_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+#Basic set-up to load libraries and data. 
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(tidylog)
+library(tidyr)
+library(janitor)
+library(digest)
+library(purrr)
+library(lubridate)
+library(styler)
+library(readxl)
+library(DT)
+library(kableExtra)
+library(infer)
+
+#Read in the data
+athletes  <- read_excel("olympics.xlsx", sheet = "athletes")
+countries <- read_excel("olympics.xlsx", sheet = "country")
+games     <- read_excel("olympics.xlsx", sheet = "games")
+medals    <- read_excel("olympics.xlsx", sheet = "medals")
+
+#Clean up column names
+athletes  <- clean_names(athletes)
+countries <- clean_names(countries)
+games     <- clean_names(games)
+medals    <- clean_names(medals)
+```
+
+### Part 1. Have some athletes competed for different countries over time?
+
+```{r multiple_country_athletes, include=FALSE}
+
+#Identify athletes who have represented more than one country.
+multiple_country_athletes <- 
+countries %>% 
+  distinct(athlete_id, noc) %>% 
+  count(athlete_id) %>% 
+  filter(n > 1)
+
+#Save overall number to variable to use in output.
+n_multiple_country_athletes <-
+multiple_country_athletes %>% 
+  nrow()
+```
+
+Overall, there have been **`r n_multiple_country_athletes`** athletes that have
+competed representing different countries. While at first glance the number 
+seems very large, it can be partially explained by geopolitical events e.g. the 
+German reunification, the collapse of the Soviet Union etc. where it was rather
+the (NOC affiliated) country that changed, rather than the athlete for example 
+relocating and taking a different nationality. The data set goes all the way 
+back to 1896, leaving plenty of time for such historical geopolitical events to
+occur, changing athletes' affiliated countries in the process.
+
+### Part 2. Who are the ten athletes that took part in most games?
+
+The below table displays the ten athletes that have participated in the most 
+games over the years and their sports.
+
+```{r top_ten_games, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Create a filter for athletes that appear the most times. Somewhat 
+#counterintuitively the countries table seems like the best place to start as it
+#has the athlete_id and games combined already.
+top10_athletes_filter <-
+countries %>% 
+  group_by(athlete_id) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  head(10) %>% 
+  pull(athlete_id)
+
+#Bring in the name of the athletes.
+top10_athletes_with_names <-
+countries %>% 
+  filter(athlete_id %in% top10_athletes_filter) %>% 
+  left_join(athletes, by=c("athlete_id" = "id")) %>% 
+  select(athlete_id, name, age, noc, games)
+
+#Do a sense check by also looking at the sport of the top 10 athletes.
+top10_athletes_with_names_and_sports <-
+top10_athletes_with_names %>% 
+  left_join(medals, by="athlete_id") %>% 
+  select(name, age, noc, sport) %>% 
+  distinct(name, sport) %>% 
+  rename("Name" = name,
+         "Sport" = sport)
+
+#Display results.
+top10_athletes_with_names_and_sports %>% 
+  kbl() %>% 
+  kable_classic(full_width = F)
+
+```
+
+### Part 3. What athlete(s) kept a Gold medal for the longest time?
+
+The below table displays the **top 15 Gold medal streaks by individuals 
+athletes**, i.e. individuals that won a Gold medal in the same event the most 
+times in a row in consecutive games. 
+
+```{r gold_streak_athletes, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Add an id for each games and previous game
+games <- 
+  games %>% 
+  arrange(season, year) %>% 
+  mutate(games_id = row_number())
+
+#Retain only gold medal winning athletes.
+medals_gold <-
+  medals %>% 
+  filter(medal == "Gold")  
+  
+#Join the two tables and removed unneeded columns.
+games_medals <- 
+  games %>% 
+  full_join(medals_gold, by="games") %>%  
+  select(-year, -season, -city, -team, -sport, -games)
+
+#Group by athlete and event, and identify their previous games.
+games_medals <-
+  games_medals %>% 
+  arrange(athlete_id) %>% 
+  group_by(athlete_id, event) %>% 
+  mutate(previous_games = lag(games_id, default = -99))
+
+#Identify starts of streaks
+games_medals <-
+  games_medals %>% 
+   mutate(streak_begin = games_id - previous_games != 1)  
+
+#Add a streak_id to facilitate counting
+games_medals <-
+  games_medals %>% 
+  mutate(streak_id = cumsum(streak_begin))
+
+#Add a counter
+games_medals_count <-
+games_medals %>% 
+  count(streak_id, sort=TRUE)
+
+#Make the final data nicer by adding athlete names.
+consecutive_gold_top_athletes <-
+  games_medals_count %>% 
+  head(15) %>% 
+  left_join(athletes, by=c("athlete_id" = "id")) %>% 
+  select(name, event, n)
+
+#Prepare data to display
+consecutive_gold_top_athletes <-
+consecutive_gold_top_athletes %>% 
+  rename("Name" = name, 
+         "Event" = event,
+         "# of consecutive golds" = n)
+
+#Display data.
+consecutive_gold_top_athletes %>% 
+  kbl(caption = "Athletes with longest gold streak per event") %>% 
+  kable_classic(full_width = F)
+```
+
+### Part 4. What country(ies) kept a Gold medal for the longest time?
+
+The below table displays the **top 15 Gold medal streaks by country**, i.e. 
+countries that won a Gold medal in the same event the most times in a row in 
+consecutive games. 
+
+```{r gold_streak_countries, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Reuse the two first tibbles created in the previous part. 
+countries_games_medals <- 
+  games %>% 
+  full_join(medals_gold, by="games") %>% 
+  distinct(games_id, team, event)
+
+#Group by country (team) and event, and identify their previous games.
+countries_games_medals <- 
+  countries_games_medals %>% 
+  arrange(team) %>% 
+  group_by(team, event) %>% 
+  mutate(previous_games = lag(games_id, default = -99))
+
+#Identify starts of streaks
+countries_games_medals <- 
+  countries_games_medals %>% 
+   mutate(streak_begin = games_id - previous_games != 1)  
+
+#Add a streak_id to facilitate counting
+countries_games_medals <- 
+  countries_games_medals %>% 
+  mutate(streak_id = cumsum(streak_begin))
+
+#Add a counter
+countries_games_medals_count <- 
+  countries_games_medals %>% 
+  count(streak_id, sort=TRUE)
+
+#Prepare data to display
+countries_games_medals_count <- 
+  countries_games_medals_count %>% 
+  head(15) %>% 
+  select(team, event, n) %>% 
+  rename("Country" = team, 
+         "Event" = event,
+         "# of consecutive golds" = n)
+
+#Display data
+countries_games_medals_count %>% 
+  kbl(caption = "Countries with longest gold streak per event") %>% 
+  kable_classic(full_width = F)
+```
+
+### Part 5. Who are the ten athletes that competed in the most events?
+
+The below table displays athletes that took part in the largest number of events
+(over potentially multiple games).
+
+```{r athletes_most_events, echo=FALSE, message=FALSE, warning=FALSE}
+athletes_most_events <-
+medals %>% 
+  distinct(athlete_id, event) %>% 
+  count(athlete_id, sort=TRUE) %>% 
+  head(10)
+
+#Prepare data for display
+athletes_most_events_display <-
+  athletes_most_events %>% 
+  left_join(athletes, by=c("athlete_id" = "id")) %>% 
+  select(name, n) %>% 
+  rename("Name" = name, 
+         "# of events" = n)
+
+#Display data
+athletes_most_events_display %>% 
+ kbl(caption = "Athletes with most events") %>% 
+  kable_classic(full_width = F)
+```
+
+### Part 6. Medals per country.
+
+The below table displays the top 15 countries in terms of overall medals won 
+over the years.
+
+```{r medals_per_country, echo=FALSE, message=FALSE, warning=FALSE}
+#Start off with the medals table, include only entries with a medal.
+medals_per_country <-
+medals %>% 
+  filter(medal != "") %>% 
+  select(games, team, medal)
+
+#Find top 15 countries in terms of appearances (i.e. medals)
+medals_per_country_filter <-
+medals_per_country %>% 
+  arrange(team) %>% 
+  count(team, sort=TRUE) %>% 
+  head(15) %>% 
+  pull(team)
+
+#Apply filter of top 15 countries.
+medals_per_country <-
+medals_per_country %>% 
+  filter(team %in% medals_per_country_filter)
+
+#Count medals by country and games.
+medals_per_country <-
+medals_per_country %>% 
+  mutate(medal = "medal") %>%  #Convert all medals to uniform name to count them
+  group_by(team, games) %>% 
+  count(medal)
+
+medals_per_country <-
+medals_per_country %>% 
+  select(-medal) %>% 
+  arrange(games) %>% 
+  pivot_wider(names_from = "games",
+              values_from = "n")
+
+#Display data
+medals_per_country %>% 
+ kbl(caption = "Countries with most medals") %>% 
+  kable_paper(full_width = F) %>% 
+  scroll_box(width = "100%")
+
+```
+
+### Part 7. Is there are relationship between country and the probability of 
+### winning a medal?
+
+```{r country_medal_probability, echo=FALSE, message=FALSE, warning=FALSE}
+#Calculate overall number of athletes that have competed in one or more events 
+#per country.
+athletes_per_country <-
+medals %>% 
+  filter(team %in% medals_per_country_filter) %>% 
+  distinct(athlete_id, team, event) %>% 
+  group_by(team) %>% 
+  summarise(total_athletes = n())
+
+#Calculate total medals per country
+medals_per_country <-
+medals_per_country %>% 
+  mutate(total_medals = rowSums(dplyr::across(2:51), na.rm = T))
+
+#Combine the two into a tibble and calculate percentage
+medals_athletes_perc <-
+  medals_per_country %>% 
+  select(team, total_medals) %>% 
+  left_join(athletes_per_country, by="team") %>% 
+  mutate(ma_perc = total_medals/total_athletes)
+
+#Draw the bar chart.
+medals_athletes_perc %>% 
+  ggplot(mapping = aes(   x = team,
+                          y = ma_perc))+
+  geom_col() +
+  geom_text(aes(label = round(ma_perc, digits=2)), 
+            position = position_stack(vjust = 0.8),
+            color = "white")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs(title="Medal/athlete ratio by country",
+       x="", 
+       y="")
+```
+
+To me, the bar chart suggests that there is a relationship between country and 
+winning a medal. The two countries that stand out are the Soviet Union and East
+Germany, where it seems that athletes from the two countries were had a high
+likelihood of coming away with a medal if they were sent to the Olympics by
+their respective countries.
+
+```{r country_medal_probability_chi, echo=FALSE, message=FALSE, warning=FALSE}
+#Chi-square test
+medals_chi <-
+  medals %>% 
+  filter(team %in% medals_per_country_filter) %>% 
+  mutate(medal_category = case_when(
+    medal != "" ~ "Medal",
+    TRUE ~ "No medal"))
+
+medals_chi <-
+  medals_chi %>% 
+  mutate(medal_category = factor(medal_category, levels = c("Medal", 
+                                                            "No medal")))
+
+medals_chi_result <-
+chisq_test(medals_chi, 
+           formula = medal_category ~ team)
+
+medals_chi_result %>% 
+  kbl(caption = "Relationship between country and medal/no medal") %>% 
+  kable_paper(full_width = F)
+```
+
+The results of the chi-squared test suggest that we can reject the null 
+hypothesis of: "There is no relationship between country and whether they win a
+medal or not". and that there is indeed a relationship between country and
+winning a medal. 
+
+### Part 8. Average heights and weights per sport.
+
+The below scatter plot displays average athlete heights and weights per sport.
+It also uses average BMI to determine an individual dot's size. The minimum and
+maximum (height, weight and BMI) values have been labeled. **(There are only 
+five labels as rhythmic gymnastics accounts for both the min BMI and min weight.)**
+
+```{r athletes_wh, echo=FALSE, fig.height=8, fig.width=13, message=FALSE, warning=FALSE}
+#Get height and weight data
+athletes_hw <-
+  athletes %>% 
+  select(id, height, weight) %>% 
+  filter(height != "" & weight !="")
+
+#Get sport data
+athletes_sport <-
+  medals %>% 
+  select(athlete_id, sport) %>% 
+  distinct(athlete_id, sport)
+
+#Combine the two for a full data set to work with
+athletes_hw_sport <- 
+athletes_hw %>% 
+  inner_join(athletes_sport, by=c("id"="athlete_id"))
+
+#Summarise the values by sport.
+athletes_hw_sport <-
+athletes_hw_sport %>% 
+  group_by(sport) %>% 
+  summarise(avg_weight = mean(weight),
+            avg_height = mean(height),
+            avg_BMI = mean(weight/(height/100)^2))
+
+#Draw the scatterplot
+athletes_hw_sport %>% 
+  ggplot(mapping=aes(x    =avg_weight, 
+                     y    =avg_height,
+                     size =avg_BMI,
+                     color=sport))+
+  geom_point()+
+  geom_text(data = athletes_hw_sport %>% 
+              filter(avg_height %in% range(avg_height) |
+                     avg_weight %in% range(avg_weight)|
+                     avg_BMI %in% range(avg_BMI)), 
+            aes(label=sport), 
+            nudge_x = 0.25, nudge_y = 1.1)+
+  labs(title="Athlete athlete weights and heights, with BMI",
+       subtitle="BMI is represented by the size of the scattered dots and text 
+       label sizes",
+       x="Weight", y="Height")
+ 
+#Check the labels are correct.
+labels <-
+  athletes_hw_sport %>% 
+  filter(avg_weight == max(avg_weight) |
+           avg_weight == min(avg_weight) |
+           avg_height == max(avg_height) |
+           avg_height == min(avg_height) |
+           avg_BMI == max(avg_BMI) |
+           avg_BMI == min(avg_BMI))
+
+
+```
+
+### Part 9. Number of medals given by year.
+
+The below table displays the evolution of the number of medals for both the 
+summer and winter games. While proportionally fewer medals are given out in the 
+winter games (presumably simply because there are fewer events, especially team
+events), both totals have risen sharply in the past 50 years. 
+
+```{r medals_by_year, echo=FALSE, fig.width=12, message=FALSE, warning=FALSE}
+#Get the initial data
+medals_by_year <-
+medals %>% 
+  filter(medal != "") %>% 
+  arrange(games)
+
+#Arrange the data for the plot.
+plot_medals_by_year <-
+medals_by_year %>% 
+  group_by(games, medal) %>% 
+  summarise(medal_count = n()) %>% 
+  mutate(season = if_else(str_detect(games, "Summer"),
+                          "Summer",
+                          "Winter"),
+         year = as.numeric(str_extract_all(games, "[:digit:]{4}")))
+
+#Draw the plot.
+plot_medals_by_year %>% 
+  mutate(medal = factor(medal, levels = c("Gold", "Silver","Bronze"))) %>% 
+  ggplot(mapping=aes(x    =year, 
+                     y    =medal_count,
+                     color=medal))+
+  geom_line()+
+  facet_wrap(vars(season), scales = "free_y")+
+  labs(title="Number of medals given out each year",
+       x="", y="Number of medals")
+```
+

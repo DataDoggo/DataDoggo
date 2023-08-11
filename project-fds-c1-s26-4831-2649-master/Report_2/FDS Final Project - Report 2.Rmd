@@ -1,0 +1,673 @@
+---
+title: 'FDS Final Project: Report #2'
+author: "Satu Iho"
+output: html_document
+always_allow_html: true
+---
+
+```{r setup, warning=FALSE, include=FALSE}
+#Basic setup
+library(httr) 
+library(rvest)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(digest)
+library(styler)
+library(ggmap)
+library(remedy)
+library(janitor)
+library(DBI) 
+library(purrr)
+library(xtable)
+library(infer)
+library(DT)
+library(leaflet)
+library(kableExtra)
+
+zh_politicians_db <- dbConnect(RSQLite::SQLite(), "zh_politicians.db") 
+
+dbListTables(zh_politicians_db)
+
+#Run in the tables.
+persons_tbl      <- tbl(zh_politicians_db, "PERSONS") 
+addresses_tbl    <- tbl(zh_politicians_db, "ADDRESSES")
+mandates_tbl     <- tbl(zh_politicians_db, "MANDATES") 
+affiliations_tbl <- tbl(zh_politicians_db, "AFFILIATIONS")
+
+#Convert the tables into tibbles.
+persons      <- as_tibble(persons_tbl)
+addresses    <- as_tibble(addresses_tbl)
+mandates     <- as_tibble(mandates_tbl)
+affiliations <- as_tibble(affiliations_tbl)
+
+#Clean up the column names.
+persons      <- clean_names(persons)
+addresses    <- clean_names(addresses)
+mandates     <- clean_names(mandates)
+affiliations <- clean_names(affiliations)
+```
+
+### Part 1. Politicians with an active mandate  
+
+The below plot displays the evolution of the number of Zürich politicians with 
+an active mandate by assembly.   
+
+```{r mandate_plot, echo=FALSE, fig.width=10, message=FALSE, warning=FALSE}
+
+#First, prepare the data for the plot. Having checked the data there is one 
+#entry with no start year and several with no end year, so I'll remove the one 
+#with no start date and add the current year 2021 as the end date for the ones 
+#with no end date yet.
+mandates <-
+mandates %>% 
+  filter(mandate_start_year > 1800) %>%       
+  mutate(mandate_end_year = replace(mandate_end_year, 
+                                    mandate_end_year == 0, 
+                                    2021))    
+
+#Then, add years_active to indicate active mandate years 
+mandate_evolution <-
+  mandates %>% 
+  mutate(years_active = map2(mandate_start_year, 
+                             mandate_end_year, 
+                             seq)) %>%             #Calculate the years active.
+  select(person_id, assembly, years_active) %>%     #Exclude redundant columns.
+  unnest()             #Unnest the years_active values to obtain a long tibble.
+
+
+#Then, draw the plot.
+mandate_evolution %>% 
+  group_by(assembly, years_active) %>% 
+  summarise("politicians_with_mandate"=n()) %>% 
+  ggplot(mapping=aes(x    =years_active, 
+                     y    =politicians_with_mandate,
+                     color=assembly))+
+  geom_line()+
+  labs(title="Number of active mandates each year",
+       subtitle="The peaks are caused by election years when multiple mandates 
+       were active for the same seat.",
+       x="Years", y="Number of mandates")
+```
+
+### Part 2. Faceted mandates  
+
+This part shows the number of mandates in terms of assembly and gender. 
+
+```{r mandate_faceted, echo=FALSE, fig.width=10, message=FALSE, warning=FALSE}
+#Bring in the gender column from the persons table.  
+mandates_with_gender <-
+mandates %>% 
+  left_join(persons, by=c("person_id"="id")) %>% 
+  select(person_id, gender, assembly, mandate_start_year, mandate_end_year)
+
+#Next, I can reuse the code from Part 1, with the addition of gender.
+#First, clean up the data from outliers, null values etc.
+mandates_with_gender_evolution <-
+  mandates_with_gender %>% 
+  filter(gender != "") %>%                #Remove entries with no gender value. 
+  filter(mandate_start_year > 1800) %>%   #Remove the one entry without a start year.
+  mutate(mandate_end_year = if_else(mandate_end_year == 0, 
+                                    2021,
+                                    mandate_end_year))    #Fill in 2021 as 
+#mandate end year for the ones entries missing values (0).
+
+#Then, add years_active and exclude unnecessary columns.
+mandates_with_gender_evolution <-
+  mandates_with_gender_evolution %>% 
+  mutate(years_active = map2(mandate_start_year, 
+                               mandate_end_year, 
+                               seq)) %>%                
+  unnest(years_active)  %>% 
+  select(-starts_with("mandate"))                      
+
+#Then, draw the plot itself with ggplot.
+mandates_with_gender_evolution %>% 
+  group_by(assembly, years_active, gender) %>% 
+  summarise("politicians_with_mandate"=n()) %>% 
+  ggplot(mapping=aes(    x = years_active, 
+                         y = politicians_with_mandate,
+                     color = gender))+
+  geom_line()+
+  facet_wrap(vars(assembly), scales = "free_y")+
+  labs(title="Number of active mandates each year by assembly and gender.",
+           x="Years", 
+           y="Number of mandates")
+
+```
+The graphs paint a rather interesting picture in terms of women's participation
+in Zürich politics: while non-existent until the start of the 1900's, the 
+numbers seem to be converging for the Cantonal Council. 
+
+### Part 3. Party affiliations in 2000.  
+
+```{r parties_in_2000, echo=FALSE, message=FALSE, warning=FALSE}
+#Use the affiliations tibble as the base.
+affiliations_2000 <-
+  affiliations %>% 
+  filter(affiliation_start_year > 1800 & 
+           affiliation_end_year > 1800 & 
+           affiliation_end_year < 2022) %>%     #Include only complete records.
+  select(person_id, party, ends_with("year")) %>%       
+  mutate(affiliation_active = map2(affiliation_start_year, 
+                                   affiliation_end_year, 
+                                   seq)) %>%                 
+  unnest() %>% 
+  filter(affiliation_active == 2000)                        
+
+#Add in the assembly details for the remaining rows.
+affiliations_2000 <-
+  affiliations_2000 %>% 
+  inner_join(mandates, by="person_id") %>%      
+  select(person_id, party, affiliation_active, assembly) %>% 
+  filter(party != "")
+
+#Then, draw the pie chart.
+affiliations_2000 %>% 
+  group_by(party, assembly) %>% 
+  summarise("party_members"=n()) %>% 
+  ggplot(aes(x="", y=party_members, fill=party)) +
+  geom_bar(stat="identity", width=1, position = "fill") + 
+  facet_wrap(vars(assembly))+
+  coord_polar("y", start=0)+
+  theme_void()
+
+#And show the table
+affiliations_2000 %>% 
+  select(-affiliation_active) %>% 
+  datatable()
+```
+
+As was also seen in the previous two graphs, only the Cantonal and Executive 
+Councils were active in 2000, with the Cantonal Council being much larger (and 
+diverse in terms of parties as shown above).
+
+### Part 4. Showing historical party representation by assembly.
+```{r party_historical, echo=FALSE, fig.width=10, message=FALSE, warning=FALSE}
+#As in the previous section, use the affiliations table as the base. 
+affiliations_evolution <-
+affiliations %>% 
+  filter(affiliation_start_year > 1800, 
+         party != "", 
+         affiliation_end_year > 1800,
+         affiliation_end_year < 2022) %>%            
+  select(person_id, party, ends_with("year")) %>%                   
+  mutate(affiliation_active = map2(affiliation_start_year, 
+                                   affiliation_end_year, 
+                                   seq))   %>%                      
+  unnest() %>% 
+  select(-ends_with("year"))
+
+#Add in the assembly details for the remaining rows.
+affiliations_evolution <-
+  affiliations_evolution %>% 
+  inner_join(mandates, by="person_id") %>% 
+  select(person_id, party, affiliation_active, assembly)
+
+#The party name column contains a lot of what seem to be incorrect/nonsensical 
+#entries, so the below code cleans them up.
+affiliations_evolution <-
+  affiliations_evolution %>% 
+  mutate(party_corrected = case_when(                   
+     #party == "AL" ~ "AL", 
+     party == "BDP" ~ "BDP",
+     #party == "BGB" ~ "Historical",
+     party == "CSP" ~ "CSP",
+     party == "CVP" ~ "CVP",
+     party == "EDU" ~ "EDU",
+     #party == "Evangelische Volkspartei" ~ "EVP",
+     party == "EVP" ~ "EVP",
+     party == "FDP" ~ "FDP",
+     #party == "FPS" ~ "Minor",
+     party == "GLP" ~ "GLP",
+     party == "GP"  ~ "Grüne",
+     party == "Grüne" ~ "Grüne",
+     #party == "LdU" ~ "Historical",
+     #party == "LS" ~ "AL",
+     party == "PdA" ~ "PdA",
+     #party == "POCH" ~ "Historical",
+     party == "SD" ~ "SD",
+     party == "SP" ~ "SP",
+     party == "SVP" ~ "SVP",
+     party == "SVP/BGB" ~ "SVP",
+     str_detect(party, "Liste") ~ "List",  #Put all "Liste" ones into one group
+     TRUE ~ "Unknown")) %>%                #Put all others in an unknown group
+  filter(party_corrected != "Unknown")     #Remove the unknown entries
+
+#Finally, draw the graph
+affiliations_evolution %>% 
+  filter(party_corrected != "List") %>% 
+  group_by(party_corrected, assembly, affiliation_active) %>% 
+  summarise("no_politicians"=n()) %>% 
+  ggplot(mapping=aes(    x = affiliation_active, 
+                         y = no_politicians,
+                      fill = party_corrected))+
+  geom_area()+
+  facet_wrap(vars(assembly))+
+  labs(title="Number of party members over time.",
+       subtitle="Note: only the larger parties with clearly identifiable names
+                 have been included.",
+              x="Years", 
+              y="Number of party members")
+```
+The above graphs show the number of party members per party and by assembly over
+the years.   
+*Note: only modern parties whose names were clearly identifiable as per [Wikipedia](https://en.wikipedia.org/wiki/List_of_political_parties_in_Switzerland) 
+from the data set are included. The decreasing number of party members (which 
+skews towards recent years) may be partially explained as politicians with no 
+affiliation end date were excluded from the analysis. Excluding the incomplete 
+records made the graph more easily readable which is why this strategy was 
+chosen over for instance defaulting all records with no end year to e.g. 2021.* 
+
+### Part 5. Politician life spans
+
+This section analyses politicians life spans (in years).  
+
+```{r life_span, include=FALSE}
+#Prepare the data by including only complete records, converting to numeric and
+#filtering out any potentially remaining nonsensical values.
+persons_with_life_span <-
+persons %>% 
+  filter(year_of_birth > 1800 & year_of_death > 1800) %>% 
+  mutate(year_of_birth = as.numeric(year_of_birth), 
+         year_of_death = as.numeric(year_of_death)) %>% 
+  mutate(life_span = year_of_death - year_of_birth) %>% 
+  filter(life_span > 18 & life_span < 100)
+
+#Save the average life_span into a variable to display within the output text. 
+avg_life_span <-
+persons_with_life_span %>% 
+  summarise(count = n(),
+            min_life_span = min(life_span),
+            max_life_span = max(life_span),
+            avg_life_span = mean(life_span)) %>% 
+  pull(avg_life_span)
+
+```
+The average life span (in years) for politicians is 
+**`r round(avg_life_span, digits=2)`**.  
+
+The average life span (in years) for politicians according to title is displayed
+below: 
+
+```{r ages_titles, echo=FALSE, paged.print=FALSE, results='asis'}
+#Use the same code as above but exclude records with blank titles.
+persons_with_life_span_title <-
+persons %>% 
+  filter(year_of_birth > 1800 & year_of_death > 1800) %>% 
+  mutate(year_of_birth = as.numeric(year_of_birth), 
+         year_of_death = as.numeric(year_of_death)) %>% 
+  mutate(life_span = year_of_death - year_of_birth) %>% 
+  filter(life_span > 18 & life_span < 100 & title != "")
+
+#Create reference tibble to view unique titles for harmonisation below.
+unique_titles <-
+persons_with_life_span_title %>% 
+  select(title) %>% 
+  unique()
+
+#Harmonise the titles a little bit for more sensible analysis.
+persons_with_life_span_title_corrected <-
+persons_with_life_span_title %>% 
+  mutate(title_corrected = case_when(                   
+     str_detect(title, regex("prof", ignore_case = TRUE)) ~ "Prof.",
+     str_detect(title, regex("dr",   ignore_case = TRUE)) ~ "Dr.",
+     str_detect(title, regex("lic",  ignore_case = TRUE)) ~ "Lic.",
+     TRUE ~ "Other")) %>% 
+  select(id, life_span, title_corrected)
+
+#Calculate average life span per corrected title.
+avg_life_span_with_title <-
+persons_with_life_span_title_corrected %>% 
+  group_by(title_corrected) %>% 
+  summarise(count = n(),
+            avg_life_span = round(mean(life_span), 
+                                  digits = 2))  %>% 
+  rename("Title" = title_corrected,
+         "Count" = count,
+         "Average life span" = avg_life_span)
+
+#Print the table with xtable.
+avg_life_span_with_title %>% 
+  kbl(caption = "Politician average life spans by title") %>% 
+  kable_paper(full_width = F)
+```
+  
+Next, we compare politicians with and without titles in terms of their lifespan.   
+
+```{r life_span_title_vs_notitle, echo=FALSE, warning=FALSE}
+
+#Apply the same title correction as above.
+persons_with_life_span_title_categorised <-
+persons_with_life_span  %>% 
+  mutate(title_categorised = if_else(title == "", 
+                                        "No title",
+                                        "Title")) %>% 
+  select(id, life_span, title_categorised)
+
+#Then, draw a plot of the average age for the two groups.
+persons_with_life_span_title_categorised %>% 
+  group_by(title_categorised) %>% 
+  summarise(avg_life_span = mean(life_span)) %>% 
+  ggplot(mapping = aes(   x = title_categorised,
+                          y = avg_life_span,
+                       fill = title_categorised))+
+  geom_col() +
+  geom_text(aes(label = round(avg_life_span, digits=2)), 
+            position = position_stack(vjust = .5))+
+  scale_y_continuous(breaks = c(20, 30, 40, 50, 60, 70, 80))+
+  theme(legend.position = "none")+ 
+  labs(title="Average life span for politicians with no title and title",
+           x="", 
+           y="Average life span")
+```
+
+Based on the chart, it is obvious that there is a difference in the average life
+span between the two groups, but whether it's big enough to be statistically 
+significant or not is hard to say.
+
+```{r t_test_lifespan, echo=FALSE, warning=FALSE}
+#Perform t-test with the data created above.
+
+t_test_p <-
+persons_with_life_span_title_categorised %>% 
+  t_test(formula = life_span ~ title_categorised,
+                   order = c("No title", "Title"),
+                   conf_level = 0.95) %>% 
+  pull(p_value)
+```
+The t-test's p-value **`r t_test_p`** suggests that there is indeed a 
+statistically significant difference between politician life spans depending on
+if they have a title or not. 
+
+### Part 6. Politicians life spans, also considering their birth before and 
+### after 1918.
+
+Similarly as the previous part, this part examines the life spans of politicians
+with and without titles, but in addition distinguishes two subgroups: 
+politicians born before and after 1918.  
+
+```{r pre1918_vs_post1918, echo=FALSE, message=FALSE, warning=FALSE}
+#Reuse the already cleansed tibble created at the start of Part 5 
+persons_with_life_span_before_1918 <-
+  persons_with_life_span%>% 
+  mutate(born_before_1918 = year_of_birth < 1918,
+         title_categorised = if_else(title == "", 
+                                     "No title",
+                                      "Title"))
+
+#In preparation for the graph, change the facet labels to more sensible ones.
+label_names_1918 <- c(`TRUE` = "Born before 1918",
+                     `FALSE` = "Born after 1918")
+
+#Finally, draw a faceted graph to show the two groups and their subgroups.
+persons_with_life_span_before_1918 %>% 
+  group_by(title_categorised, born_before_1918) %>% 
+  summarise(avg_life_span = mean(life_span)) %>% 
+  ggplot(mapping = aes(   x = title_categorised,
+                          y = avg_life_span,
+                       fill = title_categorised))+
+  geom_col() +
+  geom_text(aes(label = round(avg_life_span, digits=2)), 
+            position = position_stack(vjust = .5))+
+  scale_y_continuous(breaks = c(20, 30, 40, 50, 60, 70, 80))+
+  theme(legend.position = "none")+ 
+  facet_wrap(vars(born_before_1918), labeller = as_labeller(label_names_1918))+
+  labs(title="Average life span for politicians with no title and title",
+       subtitle = "Now also distinguishing between born after and before 1918",
+           x="", 
+           y="Average life span")
+
+```
+
+The graph suggests that the life span of politicians varies less depending on 
+whether they have a title or not if they were born **after 1918** than if they 
+were born **before 1918**. Accordingly, I would expect the t-test to show a 
+statistically significant difference in the life span means for the group 
+**born before 1918** only.
+
+```{r t_test_before_1918, echo=FALSE}
+#Do one t-test for the group born before 1918. 
+t_persons_with_life_span_before_1918 <-
+persons_with_life_span_before_1918 %>% 
+  filter(born_before_1918 == TRUE) %>% 
+  t_test(formula = life_span ~ title_categorised,
+                   order = c("No title", "Title"),
+                   conf_level = 0.95) 
+
+t_persons_with_life_span_before_1918 %>% 
+  kbl(caption = "t-test - politicians born before 1918") %>% 
+  kable_paper(full_width = F)
+```
+
+This t-test result seems to confirm the initial expectation based on the graph,
+namely that there is a statistically significant difference in the average life
+span of a politician born before 1918, depending on if they had a title or not. 
+```{r t_test_after_1918, echo=FALSE}
+#Do one t-test for the group born after 1918. 
+t_persons_with_life_span_after_1918 <-
+persons_with_life_span_before_1918 %>% 
+  filter(born_before_1918 == FALSE) %>% 
+  t_test(formula = life_span ~ title_categorised,
+                   order = c("No title", "Title"),
+                   conf_level = 0.95) 
+
+t_persons_with_life_span_after_1918 %>% 
+  kbl(caption = "t-test - politicians born after 1918") %>% 
+  kable_paper(full_width = F)
+```
+
+As expected, the hypothesis for this t-test cannot be rejected, suggesting that
+there is no statistically significant difference in the average life span of 
+politicians with and without titles if they were born after 1918. 
+
+### Part 7. Top 10 politicians with mandates
+
+The below graph shows the top ten politicians in terms of how many mandates they
+have held.
+
+```{r top_10_mandates, echo=FALSE, message=FALSE, warning=FALSE}
+
+#First, find the 10 politicians with the most mandates.
+mandates_top_10 <-
+mandates %>% 
+  count(person_id, sort=TRUE) %>% 
+  head(10)
+
+#Then, get the names added.
+mandates_top_10 <-
+mandates_top_10 %>% 
+  inner_join(persons, by=c("person_id"="id")) %>% 
+  select(person_id, n, ends_with("name")) %>% 
+  mutate(name = str_glue("{firstname} {lastname}"))
+
+#Then, draw the chart.
+mandates_top_10 %>% 
+ ggplot(mapping = aes(x = name,
+                      y = n))+
+  geom_col() +
+  coord_flip()+
+  labs(title="Top 10 number of mandates",
+           x="", 
+           y="Number of mandates")+
+  theme_minimal()
+ 
+```
+
+### Part 8. Overlapping mandates
+
+The below table displays politicians that have had overlapping mandates over the
+years.  
+
+```{r overlapping_mandates, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+#First prepare the data, only including records where there is both genuine
+#start and end dates for a mandate.
+mandates_dates <-
+  mandates %>% 
+  filter(mandate_start_day > 1 & 
+           mandate_start_month > 1 & 
+           mandate_start_year > 1800,
+         mandate_end_day > 1 & 
+           mandate_end_month > 1 & 
+           mandate_end_year > 1800) %>% 
+  mutate(mandate_start_date = dmy(str_glue("{mandate_start_day}
+                                           -{mandate_start_month}
+                                           -{mandate_start_year}")),
+         mandate_end_date   = dmy(str_glue("{mandate_end_day}
+                                           -{mandate_end_month}
+                                           -{mandate_end_year}"))) %>% 
+  select(person_id, assembly, ends_with("date")) %>% 
+  arrange(person_id, mandate_start_date)
+
+#Create a filter to retain only records for persons with more than 1 mandate.
+mandate_filter <-
+  c(mandates_dates %>% 
+      group_by(person_id) %>% 
+      summarise(count = n()) %>% 
+      filter(count >= 2) %>% 
+      pull(person_id))
+
+#Look for mandate overlaps with the lead function.
+mandate_overlaps <-
+  mandates_dates %>% 
+  filter(person_id %in% mandate_filter) %>% 
+  group_by(person_id) %>% 
+  mutate(next_mandate_start_date = lead(mandate_start_date, n=1)) %>% 
+  mutate(mandate_overlap = if_else(next_mandate_start_date > mandate_end_date, 
+                                   FALSE, 
+                                   TRUE)) %>% 
+  filter(mandate_overlap == TRUE) 
+
+#Save just the person id's with overlap into a tibble.
+mandate_overlap_person_ids <-
+  mandate_overlaps %>% 
+  select(person_id) %>% 
+  unique()
+
+#Add in the names of the person id's identified above.
+mandate_overlap_names <-
+  mandate_overlap_person_ids %>% 
+  left_join(persons, by=c("person_id"="id")) %>% 
+  mutate(name = str_glue("{firstname} {lastname}")) %>% 
+  select(name)
+
+#Print the names only.
+datatable(mandate_overlap_names)
+```
+
+### Part 9. Party affiliations changes over the years.  
+
+The below table displays how party affiliations may have been switched for 
+individual politicians over the years.
+
+```{r overlapping_party_affiliations, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+
+#First prepare the data, only including records where there is both genuine
+#start and end dates for a party affiliation.
+affiliation_dates <-
+  affiliations %>% 
+  filter(party != "",) %>% 
+  filter(affiliation_start_day > 1 & 
+           affiliation_start_month > 1 & 
+           affiliation_start_year > 1800,
+         affiliation_end_day > 1 & 
+           affiliation_end_month > 1 & 
+           affiliation_end_year > 1800 &
+           affiliation_end_year < 2022) %>% 
+  mutate(party_corrected = case_when(                   
+    party == "BDP" ~ "BDP",
+    party == "CSP" ~ "CSP",
+    party == "CVP" ~ "CVP",
+    party == "EDU" ~ "EDU",
+    party == "EVP" ~ "EVP",
+    party == "FDP" ~ "FDP",
+    party == "GLP" ~ "GLP",
+    party == "GP"  ~ "Grüne",
+    party == "Grüne" ~ "Grüne",
+    party == "PdA" ~ "PdA",
+    party == "SD" ~ "SD",
+    party == "SP" ~ "SP",
+    party == "SVP" ~ "SVP",
+    party == "SVP/BGB" ~ "SVP",
+    str_detect(party, "Liste") ~ party,  #This time retain lists as they are
+    TRUE ~ "Unknown")) %>%               
+  filter(party_corrected != "Unknown") %>% 
+  mutate(affiliation_start_date = dmy(str_glue("{affiliation_start_day}
+                                               -{affiliation_start_month}
+                                               -{affiliation_start_year}")),
+         affiliation_end_date   = dmy(str_glue("{affiliation_end_day}
+                                               -{affiliation_end_month}
+                                               -{affiliation_end_year}"))) %>% 
+  select(person_id, ends_with("date"), party_corrected) %>% 
+  arrange(person_id)
+
+#Look for politicians with more than one party affiliation.
+affiliation_overlaps <-
+  affiliation_dates %>% 
+  group_by(person_id) %>% 
+  mutate(party_different = lead(party_corrected, n=1)) %>% 
+  mutate(party_overlap = if_else(party_corrected == party_different,
+                                 FALSE, 
+                                 TRUE)) %>% 
+  filter(party_overlap == TRUE) 
+
+#Store results for DT display
+affiliation_overlaps_display <-
+  affiliation_overlaps %>% 
+  select(-starts_with("affiliation"), -party_overlap) %>% 
+  rename("Person ID" = person_id, 
+         "Party switched from" = party_corrected,
+         "Party switched to" = party_different)
+
+#Display results in DT table.
+datatable(affiliation_overlaps_display)
+```
+
+Looking at the list of politicians that have switched parties over the years, it
+seems that this was more common prior to the modern party era and rather 
+politicians would switch between lists *(I know next to nothing about especially
+historical Swiss politics so I'm not entirely sure what these Lists are 
+though...)*  It can be noted that the only modern era politicians to have 
+switched parties are politicians that have switched from Grüne to GLP.  
+
+### Part 10. Politician address mapping (sample of 20)
+
+The map below depicts the addresses of politicians selected randomly from the 
+dataset.
+
+```{r sample_addresses_map, echo=FALSE, message=FALSE, warning=FALSE}
+#Create a tibble for names and locations to fetch long and lat data.
+politician_addresses <-
+  addresses %>% 
+  left_join(persons, by=c("person_id"="id")) %>% 
+  select(firstname, lastname, street, house_number, postal_code, city) %>% 
+  filter(postal_code != "" &
+           street != "") %>% 
+  mutate(postal_code_corrected = str_extract_all(postal_code, "[:digit:]{4}",), 
+         postal_code_corrected = as.character(postal_code_corrected),
+         location = str_glue("{street} {house_number}, 
+                              {postal_code_corrected}, 
+                              {city}"),
+         name = str_glue("{firstname} {lastname}")) %>% 
+  select(name, location, everything())
+
+#As in Report 1, get longitude and latitude data using the Google geolocation API
+register_google(key = "AIzaSyD4KWAm6FqMs-5k8ARR-mgyIbYwzscYaRk")
+getOption("ggmap")
+
+#Store the lon-lat data of a sample of 20 addresses into a tibble.
+politician_addresses_long_lat <-
+  politician_addresses %>% 
+  sample_n(20) %>%                    
+  mutate_geocode(location)  
+
+#Draw the map with Leaflet.
+politician_addresses_long_lat %>%        
+  leaflet() %>% 
+  addTiles() %>% 
+  addMarkers(lng=~lon,lat=~lat,
+             label=~name)      #Add politician name as a hover over label.
+```
+
+

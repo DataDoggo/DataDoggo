@@ -1,0 +1,275 @@
+---
+title: 'FDS Final Project: Report #3'
+author: "Satu Iho"
+output: html_document
+---
+```{r set_up, include=FALSE}
+library(stringr)
+library(httr)
+library(purrr)
+library(DT)
+library(dplyr)
+library(infer)
+library(ggplot2)
+library(kableExtra)
+```
+
+### Part 1. Example GET queries.
+
+The highest grossing dramas in 2010 are shown in the table below.
+
+```{r dramas_2010, echo=FALSE, message=FALSE, warning=FALSE}
+grossing_dramas <-
+httr::GET(url = stringr::str_glue("https://api.themoviedb.org/3/\\
+                                  discover/movie?\\
+                                  api_key=be7c9b4f37423cc11b204a90a2171479\\
+                                  &primary_release_year=2010\\
+                                  &sort_by=revenue.desc"))
+
+grossing_dramas <- content(grossing_dramas, as="parsed") 
+
+#Save first 5 results for display.
+grossing_dramas <-
+grossing_dramas$results %>% 
+  map(purrr::pluck, "title") %>% 
+  head(5)  
+
+grossing_dramas <- tibble(grossing_dramas)
+
+#Show in table
+grossing_dramas %>% 
+  rename(Title = grossing_dramas) %>% 
+  kbl(caption = "5 highest grossing dramas in 2010") %>% 
+  kable_paper(full_width = F)
+
+```
+
+The films that Will Ferrell and Liam Neeson have acted in together are shown in
+the table below.
+
+```{r will_liam, echo=FALSE, message=FALSE, warning=FALSE}
+will_liam <- httr::GET(url = stringr::str_glue("https://api.themoviedb.org/3/\\
+                              discover/movie?\\
+                              api_key=be7c9b4f37423cc11b204a90a2171479\\
+                              &with_people=23659,3896\\
+                              &sort_by=vote_average.desc"))
+
+will_liam <- content(will_liam, as="parsed") 
+
+will_liam <- 
+  will_liam$results %>% 
+  map(purrr::pluck, "title")
+
+will_liam <- tibble(will_liam)
+
+#Show in table
+will_liam %>% 
+  rename(Title = will_liam) %>% 
+  kbl(caption="Films with Will Ferrell and Liam Neeson") %>% 
+  kable_paper(full_width = F)
+```
+
+```{r kids_tom, message=FALSE, warning=FALSE, include=FALSE}
+tom_kids <- httr::GET(url = stringr::str_glue("https://api.themoviedb.org/3/\\
+                              discover/movie?\\
+                              api_key=be7c9b4f37423cc11b204a90a2171479\\
+                              &certification_country=US&certification.lte=G\\
+                              &with_cast=500"))
+
+tom_kids <- content(tom_kids, as="parsed") 
+
+tom_kids <- 
+  tom_kids$results %>% 
+  map(purrr::pluck, "title")
+
+tom_kids <- tibble(tom_kids)
+
+tom_kids_movies <-
+tom_kids %>% 
+  nrow()
+```
+There are **`r tom_kids_movies`** kids' movies with Tom Cruise in them.
+
+### Part 2. Searcing for the Pixar company ID
+
+```{r pixar_id, message=FALSE, warning=FALSE, include=FALSE}
+
+pixar_id <- GET(str_glue("https://api.themoviedb.org/3\\
+                                     /search/company?\\
+                                     api_key=be7c9b4f37423cc11b204a90a2171479\\
+                                     &query=%22pixar%22&page=1"))
+
+pixar_id <- content(pixar_id, as="parsed") 
+
+pixar_id <- 
+pixar_id$results %>% 
+  map_int(purrr::pluck, "id")    #Use map_int to return an integer, not a list.
+```
+
+The Pixar ID is: **`r pixar_id`**
+
+### Part 3. Searching for Pixar films
+
+The code in this section performs a query for all Pixar films and sorts
+them in descending order in terms of revenue. The table then provides the film 
+name and popularity as visible attributes for the queried list. 
+
+```{r pixar_films, echo=FALSE}
+
+#Set final page number to 6 as per total Pixar film count (113).
+pages_pixar <- c(1:6)  
+
+#Get data.
+pixar_films <- str_glue("https://api.themoviedb.org/3/\\
+                              discover/movie?\\
+                              api_key=be7c9b4f37423cc11b204a90a2171479\\
+                              &language=en-US&sort_by=revenue.desc\\
+                              &page={pages_pixar}&with_companies={pixar_id}") %>% 
+  map(GET) %>%
+  map(content)  %>%
+  map(purrr::pluck, "results") %>%
+  purrr::flatten() %>%
+  map_dfr(magrittr::extract, c("title","popularity"))
+
+#Display the results in a nice format.
+datatable(pixar_films)
+
+```
+
+### Part 4. Comparing Pixar and Walt Disney films.  
+
+This section performs a comparison of Pixar and Disney films as per Disney's 
+acquiring of Pixar in 2006. The analysis includes all films for each
+company, with more than 50 votes, using *01.06.2006* as the cutoff date to 
+distinguish between for Pixar (prior 01.06.2016) and Disney (post 01.06.2016).
+The film *Cars* is therefore the first Pixar film classified as a Disney film,
+as it was the first film to have been released under the [Disney-Pixar branding](https://en.wikipedia.org/wiki/Pixar) 
+
+```{r disney_pixar_comparison, message=FALSE, warning=FALSE, include=FALSE}
+#First step: get the Walt Disney Pictures ID and save it as a variable.
+disney_id <- GET(str_glue("https://api.themoviedb.org/3/\\
+                           search/company?\\
+                           api_key=be7c9b4f37423cc11b204a90a2171479\\
+                           &query=%22Walt%20Disney%20Pictures%22&page=1"))
+
+disney_id <- content(disney_id, as="parsed") 
+
+
+disney_id <- 
+disney_id$results %>% 
+   map_df(magrittr::extract, c("id", "name", "origin_country")) %>% 
+   filter(name == "Walt Disney Pictures") %>% 
+   pull(id)
+
+#Second step: search for Disney films after 01.01.2006
+pages_disney <- c(1:7)
+disney_votes <- str_glue("https://api.themoviedb.org/3/\\
+                              discover/movie?\\
+                              api_key=be7c9b4f37423cc11b204a90a2171479\\
+                              &language=en-US&sort_by=vote_cound.desc\\
+                              &page={pages_disney}\\
+                              &primary_release_date.gte=2006-06-01\\
+                              &vote_count.gte=50\\
+                              &with_companies={disney_id}") %>% 
+  map(GET) %>%
+  map(content)  %>%
+  map(purrr::pluck, "results") %>%
+  purrr::flatten() %>%
+  map_dfr(magrittr::extract,
+          c("title",
+            "vote_average",
+            "vote_count",
+            "release_date"))
+
+#Second sub-step: get all Pixar films before 01.01.2006.
+pixar_votes <- str_glue("https://api.themoviedb.org/3/\\
+                              discover/movie?\\
+                              api_key=be7c9b4f37423cc11b204a90a2171479\\
+                              &language=en-US&sort_by=vote_cound.desc\\
+                              &page={pages_pixar}\\
+                              &primary_release_date.lte=2006-06-01\\
+                              &vote_count.gte=50\\
+                              &with_companies={pixar_id}") %>% 
+  map(GET) %>%
+  map(content) %>%
+  map(purrr::pluck, "results") %>%
+  purrr::flatten() %>%
+  map_dfr(magrittr::extract,
+          c("title",
+            "vote_average",
+            "vote_count",
+            "release_date"))
+
+#Add a company identifier and combine the Disney and Pixar votes tables. 
+pixar_votes <-
+pixar_votes %>% 
+  mutate(company = "Pixar")
+
+disney_votes <-
+disney_votes %>% 
+  mutate(company = "Disney")
+
+all_votes <-
+pixar_votes %>% 
+  bind_rows(disney_votes)
+
+#The API seems to bring in a lot of duplicates, so I'll remove those.
+all_votes <-
+all_votes %>% 
+  distinct()
+
+#Have a first glance at the data (not shown in output, only used during 
+#initial analysis and as a sense check)
+all_votes %>% 
+  group_by(company) %>% 
+  summarise(count = n(),
+            median = median(vote_average),
+            mean = round(mean(vote_average), digits=2),
+            standard_deviation = round(sd(vote_average),digits=2),
+            min = min(vote_average),
+            max = max(vote_average)
+            )
+```
+
+First, let's look at a boxplot for the two companies' vote averages.
+
+```{r disney_pixar_comparison_plot, echo=FALSE, message=FALSE, warning=FALSE}
+#Draw boxplot to view the data. 
+all_votes %>% 
+  group_by(company) %>% 
+  ggplot(aes(x=company, y=vote_average)) +
+  geom_boxplot(alpha = 0.1, fill="blue")+
+  coord_flip()+
+  theme_classic()+
+  scale_y_continuous(breaks = c(5, 5.5, 6, 6.5, 7, 7.5, 8))+
+  labs(title="Comparing Disney and Pixar's vote averages",
+       x="Company", y="Vote average",
+       caption= "Data from The Movie Database")
+
+```
+
+Based on the plot it seems like films produced under Disney's ownership have 
+been less popular with the public than the original Pixar films, with a lower 
+median and the votes being skewed to the lower end of the scale for Disney. 
+
+Next, let's do a formal t-test to test for a statistically significant 
+difference in the two vote average means.
+
+```{r t_test_disney_pixar, echo=FALSE, message=FALSE, warning=FALSE}
+#Run the t-test
+t_test_votes <-
+all_votes %>% 
+  group_by(company) %>% 
+  t_test(formula = vote_average ~ company,
+                   order = c("Disney", "Pixar"),
+                   conf_level = 0.95)
+
+t_test_votes %>% 
+  kbl(caption = "t-test Disney - Pixar vote averages") %>% 
+  kable_paper(full_width = F)
+```
+
+The t-test suggests that there is no statistically significant difference in the
+vote means for the two companies. 
+
+
